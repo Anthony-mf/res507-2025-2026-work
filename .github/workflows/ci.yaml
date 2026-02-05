@@ -30,8 +30,41 @@ jobs:
       - name: Run container
         run: |
           docker run -d --name quote-app -p 3000:3000 quote-app
-          timeout 30s bash -c 'until curl -fsS http://localhost:3000/health > /dev/null; do sleep 1; done' || (docker logs quote-app && exit 1)
-          echo "Health check passed"
+          
+          # Wait for container to be ready and verify health check
+          echo "Waiting for container to be ready..."
+          for i in {1..30}; do
+            # Try to get health check response
+            RESPONSE=$(curl -s -w "\n%{http_code}" http://localhost:3000/health 2>/dev/null || echo "000")
+            HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+            BODY=$(echo "$RESPONSE" | head -n-1)
+            
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "Container responded with HTTP 200"
+              
+              # Verify response content
+              echo "Response body: $BODY"
+              
+              # Check if response is valid JSON with ok:true
+              if echo "$BODY" | jq -e '.ok == true' > /dev/null 2>&1; then
+                echo "✓ Health check passed - response contains ok:true"
+                exit 0
+              else
+                echo "✗ Health check failed - invalid response content"
+                echo "Expected: {\"ok\":true}"
+                echo "Got: $BODY"
+                docker logs quote-app
+                exit 1
+              fi
+            fi
+            
+            echo "Attempt $i/30 - waiting for container..."
+            sleep 1
+          done
+          
+          echo "✗ Health check failed - container did not respond in time"
+          docker logs quote-app
+          exit 1
 
       - name: Stop container
         if: always()
