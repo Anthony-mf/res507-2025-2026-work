@@ -14,34 +14,29 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "24"  
+          node-version: "20"
 
       - name: Install dependencies
-        working-directory: app
+        working-directory: labs/40-containerized-node-app/app
         run: npm ci
 
-      - name: Run tests if present
-        working-directory: app
+      - name: Run linter
+        working-directory: labs/40-containerized-node-app/app
+        run: npm run lint --if-present
+
+      - name: Run tests
+        working-directory: labs/40-containerized-node-app/app
         run: npm test --if-present
 
       - name: Build Docker image
-        run: docker build -t quote-app -f docker/Dockerfile .
+        run: docker build -t quote-app -f labs/40-containerized-node-app/docker/Dockerfile labs/40-containerized-node-app
 
       - name: Run container
         run: |
           docker run -d --name quote-app -p 3000:3000 quote-app
-          for i in $(seq 1 30); do
-            if curl -fsS http://localhost:3000/health >/dev/null; then
-              echo "Health check passed"
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "Health check failed"
-          docker logs quote-app || true
-          exit 1
+          timeout 30s bash -c 'until curl -fsS http://localhost:3000/health > /dev/null; do sleep 1; done' || (docker logs quote-app && exit 1)
+          echo "Health check passed"
 
       - name: Stop container
         if: always()
-        run: |
-          docker rm -f quote-app || true
+        run: docker rm -f quote-app || true
