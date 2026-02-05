@@ -9,49 +9,39 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # Récupération code
       - name: Check out repository
         uses: actions/checkout@v4
 
-      # Setup Node.js
+      # ÉTAPE DE DÉBOGAGE : Affiche l'arborescence pour vérifier les chemins
+      - name: Debug file structure
+        run: ls -R
+
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "24"
+          node-version: "20" # Version stable recommandée (24 n'existe pas encore en LTS standard)
 
-      # Installation dépendances
       - name: Install dependencies
-        working-directory: labs/40-containerized-node-app/app
+        # Vérifiez que ce chemin existe vraiment dans votre dépôt git !
+        working-directory: labs/40-containerized-node-app/app 
         run: npm ci
 
-      # Tests applicatifs
       - name: Run tests if present
         working-directory: labs/40-containerized-node-app/app
         run: npm test --if-present
 
-      # Build image
-      # Note : on se place dans le dossier du lab pour que Docker trouve le Dockerfile
       - name: Build Docker image
+        # On exécute la commande depuis la racine pour simplifier les contextes
         run: |
-          cd labs/40-containerized-node-app
-          docker build -t quote-app -f docker/Dockerfile .
+          docker build -t quote-app -f labs/40-containerized-node-app/docker/Dockerfile labs/40-containerized-node-app
 
-      # Test runtime
       - name: Run container
         run: |
           docker run -d --name quote-app -p 3000:3000 quote-app
-          for i in $(seq 1 30); do
-            if curl -fsS http://localhost:3000/health >/dev/null; then
-              echo "Health check passed"
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "Health check failed"
-          docker logs quote-app || true
-          exit 1
+          # Attente active avec curl
+          timeout 30s bash -c 'until curl -fsS http://localhost:3000/health > /dev/null; do sleep 1; done' || (docker logs quote-app && exit 1)
+          echo "Health check passed"
 
-      # Nettoyage conteneur
       - name: Stop container
         if: always()
         run: docker rm -f quote-app || true
