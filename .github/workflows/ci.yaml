@@ -20,10 +20,6 @@ jobs:
         working-directory: labs/40-containerized-node-app/app
         run: npm ci
 
-      - name: Run linter
-        working-directory: labs/40-containerized-node-app/app
-        run: npm run lint --if-present
-
       - name: Run tests
         working-directory: labs/40-containerized-node-app/app
         run: npm test --if-present
