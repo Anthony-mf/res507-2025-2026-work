@@ -132,3 +132,172 @@ Cloud Provider (AWS/GCP/Azure)
 ```
 
 Cette approche hybride combine la robustesse des VMs avec l'agilité des conteneurs.
+
+---
+
+## Scaling Horizontal (Horizontal Scaling)
+
+### Mise en Pratique avec quote-app
+
+Le scaling horizontal consiste à augmenter le nombre de réplicas (instances) d'une application pour gérer plus de charge, plutôt que d'augmenter les ressources d'une seule instance (scaling vertical).
+
+#### Commandes Exécutées
+
+```bash
+# Scaler le deployment à 3 réplicas
+kubectl scale deployment quote-app --replicas=3
+
+# Vérifier les pods
+kubectl get pods
+```
+
+#### Résultat Observé
+
+```
+NAME                         READY   STATUS    RESTARTS   AGE
+postgres-6f759cbf79-qs8bx    1/1     Running   0          56m
+quote-app-6bbcb5cb87-tc6g7   0/1     Evicted   0          4h31m
+quote-app-7f87bc4dc6-g5cx9   1/1     Running   0          10s
+quote-app-7f87bc4dc6-pbr2v   1/1     Running   0          10s
+quote-app-7f87bc4dc6-rrrq4   1/1     Running   0          3h17m
+```
+
+**Observations** :
+- ✅ 3 pods `quote-app` actifs (g5cx9, pbr2v, rrrq4)
+- ✅ Démarrage rapide des nouveaux pods (10 secondes)
+- ✅ 1 pod postgres (pas scalé, car base de données stateful)
+- ⚠️ 1 pod évincé (Evicted) - manque de ressources précédemment
+
+---
+
+### Ce Qui Change Quand On Scale
+
+#### 1. **Nombre de Pods**
+- Passage de 1 à 3 instances de `quote-app`
+- Kubernetes crée automatiquement les nouveaux pods selon le template du Deployment
+
+#### 2. **Distribution de la Charge (Load Balancing)**
+- Le Service `quote-app` distribue automatiquement les requêtes entre les 3 réplicas
+- Chaque rafraîchissement de page peut être servi par un pod différent
+- Utilisation du mécanisme de load balancing round-robin ou aléatoire de Kubernetes
+
+#### 3. **Résilience et Haute Disponibilité**
+- Si un pod tombe, les 2 autres continuent de servir les requêtes
+- Kubernetes redémarre automatiquement le pod défaillant
+- Pas d'interruption de service (downtime réduit)
+
+#### 4. **Capacité de Traitement**
+- Capacité théorique multipliée par 3
+- Peut gérer 3x plus de requêtes simultanées
+- Meilleure utilisation des ressources du cluster
+
+#### 5. **Consommation de Ressources**
+- CPU et mémoire utilisés multipliés par ~3
+- Chaque pod consomme ses propres ressources
+- Important de surveiller les limites du cluster
+
+---
+
+### Ce Qui NE Change PAS Quand On Scale
+
+#### 1. **Le Service (Endpoint Unique)**
+- L'adresse du service reste identique : `quote-app:80`
+- Les clients n'ont pas besoin de connaître le nombre de réplicas
+- Le DNS interne Kubernetes pointe toujours vers le même service
+
+#### 2. **La Base de Données**
+- Un seul pod PostgreSQL (volontairement)
+- Les 3 réplicas `quote-app` se connectent à la même instance de base de données
+- Les données restent cohérentes et centralisées
+
+#### 3. **La Configuration**
+- Variables d'environnement identiques pour tous les pods
+- Même image Docker utilisée (`quote-app:local`)
+- Même configuration de probes (readiness/liveness)
+
+#### 4. **Le Code de l'Application**
+- L'application elle-même n'a pas besoin d'être modifiée
+- Pas de logique spéciale pour gérer le scaling
+- L'application reste stateless (sans état local)
+
+#### 5. **Les Volumes Persistants**
+- Le PersistentVolumeClaim postgres reste unique
+- Pas de duplication des données
+- Seul le pod postgres y accède
+
+---
+
+### Comportement Observé lors du Test
+
+#### Test avec Port-Forward
+
+```bash
+kubectl port-forward svc/quote-app 8080:80
+```
+
+En rafraîchissant la page plusieurs fois :
+
+**Réponses Cohérentes** ✅
+- Les données affichées sont identiques (même base de données)
+- Les citations proviennent de la même source PostgreSQL
+- Pas de divergence de données entre les réplicas
+
+**Réponses Potentiellement Différentes** ⚠️
+- Le pod qui répond peut changer à chaque requête
+- Si l'application loggait l'ID du pod, on verrait des IDs différents
+- Les temps de réponse peuvent varier légèrement selon le pod
+
+---
+
+### Quand Scaler Horizontalement ?
+
+#### ✅ Scaler Quand :
+- Le trafic augmente (plus d'utilisateurs)
+- Vous avez besoin de haute disponibilité
+- Vous voulez réduire le risque de downtime
+- L'application est stateless (sans état local)
+- Vous voulez distribuer la charge
+
+#### ❌ Ne PAS Scaler Quand :
+- L'application est stateful avec état local (comme une base de données traditionnelle)
+- Les ressources du cluster sont limitées
+- L'application n'est pas thread-safe ou a des problèmes de concurrence
+- Le bottleneck est ailleurs (base de données, réseau)
+
+---
+
+### Différence : Scaling Horizontal vs Vertical
+
+| Aspect | Scaling Horizontal | Scaling Vertical |
+|--------|-------------------|------------------|
+| **Méthode** | Ajouter plus de pods/instances | Augmenter CPU/RAM d'un pod |
+| **Commande** | `kubectl scale --replicas=N` | Modifier `resources.limits` dans le deployment |
+| **Limite** | Limitée par les nœuds du cluster | Limitée par la taille maximale d'un nœud |
+| **Résilience** | Haute (plusieurs instances) | Faible (single point of failure) |
+| **Coût** | Linéaire avec le nombre d'instances | Peut être exponentiel (grandes VMs coûteuses) |
+| **Cas d'usage** | Applications stateless, microservices | Applications stateful, bases de données |
+
+---
+
+### Application à Notre Architecture
+
+Dans notre cas **quote-app** :
+- ✅ **Scalable horizontalement** : Application Node.js stateless
+- ✅ **Service load balancer** : Distribue automatiquement les requêtes
+- ❌ **PostgreSQL non scalé** : Base de données stateful, nécessite une stratégie différente (réplication, clustering)
+
+**Architecture après scaling** :
+```
+Service: quote-app (port 80)
+    ├── Pod: quote-app-1 (port 3000)
+    ├── Pod: quote-app-2 (port 3000)
+    └── Pod: quote-app-3 (port 3000)
+         ↓ (tous se connectent à)
+Service: postgres (port 5432)
+    └── Pod: postgres (unique)
+```
+
+**Point d'Attention** : La base de données devient un potentiel bottleneck. Pour scaler PostgreSQL, il faudrait :
+- Utiliser une solution de réplication (Primary-Replica)
+- Utiliser un opérateur Kubernetes (CloudNativePG, Zalando Postgres Operator)
+- Ou utiliser une base de données managée (AWS RDS, Google Cloud SQL)
