@@ -1348,9 +1348,84 @@ Les health probes sont **essentielles** pour :
 
 **Sans probes** : Votre application est comme un pilote automatique sans capteurs - elle ne sait pas quand elle est en difficulté ! ✈️❌
 
+
 **Avec probes** : Kubernetes surveille en permanence et corrige automatiquement les problèmes. ✈️✅
 
 **Règle d'or** : Toujours configurer readiness ET liveness probes en production !
 
+---
 
+## Documentation Additionnelle
 
+Pour des analyses approfondies sur les sujets suivants, consultez les fichiers dédiés :
+
+### 1. [Kubernetes et Virtualisation](kubernetes-virtualization.md)
+- Ce qui tourne sous votre cluster k3s
+- Kubernetes vs Virtualisation : complémentaires, pas concurrents
+- Hébergement des nœuds dans le cloud
+- Architectures dans différents environnements :
+  - Datacenter cloud (AWS/GCP/Azure)
+  - Système embarqué automobile
+  - Institution financière
+
+### 2. [Architecture de Production](production-architecture.md)
+- Design complet d'architecture production-ready
+- Configuration multi-nœuds avec haute disponibilité
+- Stratégies de persistence et backup
+- Monitoring (Prometheus, Grafana) et Logging (EFK)
+- Intégration CI/CD (GitHub Actions, GitOps)
+- Répartition : ce qui tourne dans K8s vs VMs vs hors cluster
+- Sécurité : Network Policies, RBAC, Pod Security Standards
+
+### 3. [Secrets et Tests de Panne](secrets-and-failure-testing.md)
+- Test de panne contrôlée (ImagePullBackOff)
+- Analyse détaillée des événements Kubernetes
+- Migration vers configuration basée sur Secrets
+- Sécurité des Secrets : chiffrement en transit vs au repos
+- Bonnes pratiques et alternatives (Vault, Cloud Secrets)
+
+---
+
+## Résumé des Implémentations
+
+### ✅ Réalisations
+
+1. **Isolation et Self-Healing**
+   - Pods isolés par namespace et réseau
+   - Récupération automatique après suppression de pod
+   - Résilience face aux pannes de nœuds
+
+2. **Scaling Horizontal**
+   - Passage de 1 à 3 réplicas
+   - Load balancing automatique par le Service
+   - Haute disponibilité
+
+3. **Resource Limits**
+   - CPU: 100m (requests) - 250m (limits)
+   - Memory: 128Mi (requests) - 256Mi (limits)
+   - QoS Class: Burstable
+
+4. **Health Probes**
+   - Readiness probe (3s delay, 5s period)
+   - Liveness probe (30s delay, 10s period)
+   - Zero-downtime deployments
+
+5. **Sécurité**
+   - Migration vers Kubernetes Secrets
+   - Credentials hors du code source
+   - Rotation facilitée
+
+6. **Tests de Résilience**
+   - Test de panne contrôlée (image invalide)
+   - Observation du comportement de récupération
+   - Validation du rolling update intelligent
+
+### 📚 Documentation Complète
+
+- Architecture mappée et diagrammée
+- Concepts Kubernetes expliqués en détail
+- Comparaisons VMs vs Conteneurs
+- Architectures de production pour différents contextes
+- Bonnes pratiques et recommandations
+
+**Total** : ~2000 lignes de documentation technique en français ! 🎉

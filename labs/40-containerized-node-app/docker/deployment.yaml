@@ -19,7 +19,10 @@ spec:
             - containerPort: 3000
           env:
             - name: DATABASE_URL
-              value: "postgres://quoteuser:quotepass@postgres:5432/quotes"
+              valueFrom:
+                secretKeyRef:
+                  name: quote-db-secret
+                  key: DATABASE_URL
           resources:
             requests:
               cpu: "100m"
