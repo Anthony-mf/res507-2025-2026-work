@@ -301,3 +301,252 @@ Service: postgres (port 5432)
 - Utiliser une solution de réplication (Primary-Replica)
 - Utiliser un opérateur Kubernetes (CloudNativePG, Zalando Postgres Operator)
 - Ou utiliser une base de données managée (AWS RDS, Google Cloud SQL)
+
+---
+
+## Simulation de Panne et Auto-Réparation
+
+### Test de Résilience : Suppression d'un Pod
+
+Pour tester les capacités d'auto-réparation de Kubernetes, nous avons supprimé manuellement un pod en cours d'exécution.
+
+#### Commandes Exécutées
+
+```bash
+# Supprimer un pod spécifique
+kubectl delete pod quote-app-7f87bc4dc6-rrrq4
+
+# Observer immédiatement l'état des pods
+kubectl get pods
+```
+
+#### Résultat Observé
+
+**Avant la suppression** :
+```
+NAME                         READY   STATUS    RESTARTS   AGE
+quote-app-7f87bc4dc6-g5cx9   1/1     Running   0          9m30s
+quote-app-7f87bc4dc6-pbr2v   1/1     Running   0          9m30s
+quote-app-7f87bc4dc6-rrrq4   1/1     Running   0          3h17m  ← Pod à supprimer
+```
+
+**Après la suppression (8 secondes plus tard)** :
+```
+NAME                         READY   STATUS    RESTARTS   AGE
+postgres-6f759cbf79-qs8bx    1/1     Running   0          66m
+quote-app-6bbcb5cb87-tc6g7   0/1     Evicted   0          4h41m
+quote-app-7f87bc4dc6-822mr   1/1     Running   0          8s     ← Nouveau pod créé automatiquement
+quote-app-7f87bc4dc6-g5cx9   1/1     Running   0          9m30s
+quote-app-7f87bc4dc6-pbr2v   1/1     Running   0          9m30s
+```
+
+**Observations** :
+- ✅ Le pod `rrrq4` a été supprimé
+- ✅ Un nouveau pod `822mr` a été créé automatiquement en **8 secondes**
+- ✅ Le nombre total de réplicas reste à 3 (comme spécifié dans le Deployment)
+- ✅ Les 2 autres pods continuent de fonctionner normalement
+- ✅ Aucune interruption de service (les requêtes sont servies par les 2 pods restants)
+
+---
+
+### Qui a Recréé le Pod ?
+
+**Réponse : Le Deployment Controller (Contrôleur de Deployment)**
+
+#### Explication Détaillée
+
+1. **Le Deployment Controller** est un composant du control plane de Kubernetes qui surveille en permanence l'état des Deployments.
+
+2. **État Désiré vs État Actuel** :
+   - **État désiré** : 3 réplicas (défini dans `deployment.yaml` : `replicas: 3`)
+   - **État actuel après suppression** : 2 réplicas en cours d'exécution
+   - **Écart détecté** : Il manque 1 réplica
+
+3. **Boucle de Réconciliation** :
+   - Le Deployment Controller détecte l'écart entre l'état désiré et l'état actuel
+   - Il demande au Scheduler de créer un nouveau pod
+   - Le Scheduler choisit un nœud approprié
+   - Le Kubelet sur ce nœud démarre le nouveau conteneur
+
+4. **Processus Automatique** :
+   - Aucune intervention humaine nécessaire
+   - Temps de réaction : quasi-instantané (quelques secondes)
+   - Le nouveau pod utilise le même template que les pods existants
+
+---
+
+### Pourquoi le Pod a-t-il été Recréé ?
+
+**Réponse : Pour maintenir l'état désiré spécifié dans le Deployment**
+
+#### Principes Fondamentaux de Kubernetes
+
+1. **Déclaratif vs Impératif** :
+   - Kubernetes fonctionne en mode **déclaratif** : vous déclarez l'état désiré
+   - Le système travaille en permanence pour atteindre et maintenir cet état
+   - Contrairement au mode impératif où vous donnez des commandes explicites
+
+2. **Self-Healing (Auto-Réparation)** :
+   - Kubernetes détecte automatiquement les défaillances
+   - Il prend des mesures correctives sans intervention humaine
+   - Objectif : garantir la haute disponibilité des applications
+
+3. **Desired State Management** :
+   - Le Deployment spécifie `replicas: 3`
+   - C'est un contrat : "Je veux toujours 3 pods en cours d'exécution"
+   - Kubernetes garantit ce contrat en permanence
+
+4. **Résilience par Design** :
+   - Les pods sont éphémères (temporaires) par nature
+   - Ils peuvent être supprimés, crasher, ou être évincés
+   - Le Deployment assure leur remplacement automatique
+
+---
+
+### Que se Passerait-il si le Nœud Lui-Même Tombait ?
+
+**Réponse : Kubernetes replanifierait automatiquement tous les pods du nœud défaillant sur d'autres nœuds disponibles**
+
+#### Scénario de Défaillance de Nœud
+
+##### 1. **Détection de la Panne**
+
+```
+Nœud 1 (défaillant)
+    ├── quote-app-pod-1  ← Inaccessible
+    └── quote-app-pod-2  ← Inaccessible
+
+Nœud 2 (sain)
+    └── quote-app-pod-3  ← Continue de fonctionner
+```
+
+- Le **Node Controller** détecte que le nœud ne répond plus
+- Délai de détection : ~40 secondes par défaut (`node-monitor-grace-period`)
+- Après 5 minutes sans réponse, le nœud est marqué comme `NotReady`
+
+##### 2. **Éviction des Pods**
+
+- Les pods sur le nœud défaillant sont marqués comme `Terminating`
+- Après un délai (`pod-eviction-timeout`, ~5 minutes par défaut), ils sont considérés comme perdus
+- Le Deployment Controller détecte que l'état actuel (1 pod) ne correspond pas à l'état désiré (3 pods)
+
+##### 3. **Replanification Automatique**
+
+```
+Nœud 2 (sain)
+    ├── quote-app-pod-3  ← Existant
+    ├── quote-app-pod-4  ← Nouveau (remplace pod-1)
+    └── quote-app-pod-5  ← Nouveau (remplace pod-2)
+```
+
+- Le Scheduler choisit des nœuds sains pour les nouveaux pods
+- Les nouveaux pods sont créés sur les nœuds disponibles
+- Le nombre total de réplicas revient à 3
+
+##### 4. **Temps de Récupération**
+
+- **Détection** : ~40 secondes à 5 minutes (selon la configuration)
+- **Replanification** : Quelques secondes une fois la panne détectée
+- **Démarrage des pods** : 10-30 secondes (selon l'application)
+- **Total** : ~5-10 minutes dans le pire des cas
+
+#### Limitations et Considérations
+
+##### ⚠️ **Perte de Données Potentielle**
+
+Si le nœud hébergeait le pod PostgreSQL avec un volume local :
+- Les données pourraient être inaccessibles jusqu'au retour du nœud
+- **Solution** : Utiliser des PersistentVolumes avec stockage réseau (NFS, Ceph, cloud storage)
+- Notre configuration utilise un PVC, donc les données persistent même si le nœud tombe
+
+##### ⚠️ **Capacité du Cluster**
+
+- Si les nœuds restants n'ont pas assez de ressources (CPU, RAM), les pods ne pourront pas être replanifiés
+- Ils resteront en état `Pending`
+- **Solution** : Dimensionner le cluster avec de la capacité de réserve
+
+##### ⚠️ **Affinité et Anti-Affinité**
+
+- Si des règles d'affinité sont configurées, elles peuvent limiter les nœuds disponibles
+- **Exemple** : Un pod configuré pour tourner uniquement sur des nœuds avec GPU
+
+##### ⚠️ **StatefulSets vs Deployments**
+
+- Les **StatefulSets** (pour bases de données) ont un comportement différent
+- Ils ne replanifient pas automatiquement si le nœud est juste `NotReady` (pour éviter le split-brain)
+- Ils attendent que le nœud revienne ou qu'il soit explicitement supprimé
+
+---
+
+### Comparaison : Défaillance Pod vs Défaillance Nœud
+
+| Aspect | Défaillance Pod | Défaillance Nœud |
+|--------|----------------|------------------|
+| **Détection** | Immédiate | 40s à 5 minutes |
+| **Récupération** | ~8 secondes | 5-10 minutes |
+| **Impact** | Minimal (autres pods actifs) | Potentiellement plusieurs pods affectés |
+| **Cause** | Crash application, OOM, liveness probe | Panne matérielle, réseau, kernel panic |
+| **Action Kubernetes** | Redémarre le conteneur ou recrée le pod | Replanifie tous les pods du nœud |
+
+---
+
+### Bonnes Pratiques pour la Résilience
+
+#### 1. **Toujours Utiliser des Deployments**
+- Ne jamais créer des pods nus (sans contrôleur)
+- Les Deployments garantissent l'auto-réparation
+
+#### 2. **Configurer des Réplicas Multiples**
+- Minimum 2-3 réplicas pour les applications critiques
+- Permet de survivre aux pannes de pods individuels
+
+#### 3. **Utiliser des PodDisruptionBudgets**
+```yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: quote-app-pdb
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: quote-app
+```
+- Garantit qu'au moins 2 pods restent disponibles pendant les maintenances
+
+#### 4. **Configurer des Probes Appropriées**
+- **Liveness Probe** : Détecte les conteneurs bloqués
+- **Readiness Probe** : Évite d'envoyer du trafic aux pods non prêts
+- **Startup Probe** : Pour les applications avec démarrage lent
+
+#### 5. **Utiliser des Volumes Persistants Réseau**
+- Éviter les volumes locaux pour les données critiques
+- Utiliser NFS, Ceph, ou stockage cloud (EBS, Persistent Disk)
+
+#### 6. **Distribuer les Pods sur Plusieurs Nœuds**
+```yaml
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+    - weight: 100
+      podAffinityTerm:
+        labelSelector:
+          matchLabels:
+            app: quote-app
+        topologyKey: kubernetes.io/hostname
+```
+- Évite que tous les pods soient sur le même nœud
+
+---
+
+### Conclusion : Auto-Réparation de Kubernetes
+
+Kubernetes fournit une **résilience automatique** à plusieurs niveaux :
+
+1. ✅ **Niveau Conteneur** : Liveness probes redémarrent les conteneurs défaillants
+2. ✅ **Niveau Pod** : Deployment Controller recrée les pods supprimés
+3. ✅ **Niveau Nœud** : Scheduler replanifie les pods des nœuds défaillants
+4. ✅ **Niveau Application** : Services distribuent la charge entre pods sains
+
+Cette architecture permet de construire des **systèmes hautement disponibles** sans intervention manuelle constante.
+
