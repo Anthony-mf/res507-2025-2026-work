@@ -550,3 +550,376 @@ Kubernetes fournit une **résilience automatique** à plusieurs niveaux :
 
 Cette architecture permet de construire des **systèmes hautement disponibles** sans intervention manuelle constante.
 
+---
+
+## Limites de Ressources (Resource Limits)
+
+### Configuration des Contraintes de Ressources
+
+Pour garantir une utilisation équitable des ressources du cluster et éviter qu'un pod ne monopolise toutes les ressources, nous avons ajouté des contraintes de ressources au deployment.
+
+#### Modification Appliquée
+
+```yaml
+resources:
+  requests:
+    cpu: "100m"
+    memory: "128Mi"
+  limits:
+    cpu: "250m"
+    memory: "256Mi"
+```
+
+#### Commandes Exécutées
+
+```bash
+# Appliquer le deployment mis à jour
+kubectl apply -f deployment.yaml
+
+# Vérifier les pods
+kubectl get pods
+
+# Observer les détails du pod
+kubectl describe pod quote-app-c87bc649d-5bwx2
+```
+
+#### Résultat Observé
+
+```
+Name:             quote-app-c87bc649d-5bwx2
+Namespace:        quote-lab
+Status:           Running
+QoS Class:        Burstable
+
+Containers:
+  quote-app:
+    Limits:
+      cpu:     250m
+      memory:  256Mi
+    Requests:
+      cpu:      100m
+      memory:   128Mi
+```
+
+**Observations** :
+- ✅ Nouveau pod créé avec les contraintes de ressources
+- ✅ QoS Class: **Burstable** (car requests < limits)
+- ✅ CPU request: 100m (0.1 CPU core)
+- ✅ CPU limit: 250m (0.25 CPU core)
+- ✅ Memory request: 128Mi
+- ✅ Memory limit: 256Mi
+
+---
+
+### Requests vs Limits : Quelle est la Différence ?
+
+#### **Requests (Demandes)**
+
+**Définition** : La quantité **minimale garantie** de ressources qu'un pod recevra.
+
+**Caractéristiques** :
+- Utilisées par le **Scheduler** pour décider sur quel nœud placer le pod
+- Le nœud doit avoir au moins cette quantité de ressources disponibles
+- Le pod est **garanti** de recevoir au moins cette quantité
+- Si le nœud est sous pression, le pod conserve ses ressources demandées
+
+**Dans notre cas** :
+- `cpu: "100m"` = Le pod est garanti d'avoir 0.1 CPU core (10% d'un core)
+- `memory: "128Mi"` = Le pod est garanti d'avoir 128 MiB de RAM
+
+**Analogie** : C'est comme une **réservation d'hôtel** - vous êtes garanti d'avoir au moins cette chambre.
+
+---
+
+#### **Limits (Limites)**
+
+**Définition** : La quantité **maximale** de ressources qu'un pod peut utiliser.
+
+**Caractéristiques** :
+- Le pod **ne peut jamais dépasser** cette limite
+- Pour le CPU : Le pod sera **throttled** (ralenti) s'il essaie d'utiliser plus
+- Pour la mémoire : Le pod sera **tué (OOMKilled)** s'il dépasse la limite
+- Empêche un pod de monopoliser toutes les ressources du nœud
+
+**Dans notre cas** :
+- `cpu: "250m"` = Le pod ne peut pas utiliser plus de 0.25 CPU core (25% d'un core)
+- `memory: "256Mi"` = Le pod sera tué s'il essaie d'utiliser plus de 256 MiB
+
+**Analogie** : C'est comme un **plafond de dépenses** - vous ne pouvez pas dépasser ce montant.
+
+---
+
+### Tableau Comparatif : Requests vs Limits
+
+| Aspect | Requests | Limits |
+|--------|----------|--------|
+| **Définition** | Ressources minimales garanties | Ressources maximales autorisées |
+| **Utilisé par** | Scheduler (placement des pods) | Kubelet (enforcement au runtime) |
+| **Garantie** | Le pod recevra AU MOINS cette quantité | Le pod ne peut PAS dépasser cette quantité |
+| **CPU - Dépassement** | Peut utiliser plus si disponible | Throttling (ralentissement) |
+| **Mémoire - Dépassement** | Peut utiliser plus si disponible | OOMKilled (pod tué) |
+| **Impact sur scheduling** | Nœud doit avoir cette capacité disponible | N'affecte pas le scheduling |
+
+---
+
+### Classes de QoS (Quality of Service)
+
+Kubernetes assigne automatiquement une classe QoS à chaque pod selon ses ressources configurées.
+
+#### 1. **Guaranteed** (Garanti)
+- **Condition** : `requests == limits` pour CPU ET mémoire
+- **Priorité** : La plus haute
+- **Éviction** : Dernier à être évincé en cas de pression de ressources
+```yaml
+resources:
+  requests:
+    cpu: "250m"
+    memory: "256Mi"
+  limits:
+    cpu: "250m"
+    memory: "256Mi"
+```
+
+#### 2. **Burstable** (Éclatement) ← **Notre cas**
+- **Condition** : `requests < limits` OU seulement requests définis
+- **Priorité** : Moyenne
+- **Éviction** : Évincé après les pods BestEffort
+- **Avantage** : Peut utiliser plus de ressources si disponibles
+```yaml
+resources:
+  requests:
+    cpu: "100m"
+    memory: "128Mi"
+  limits:
+    cpu: "250m"
+    memory: "256Mi"
+```
+
+#### 3. **BestEffort** (Meilleur Effort)
+- **Condition** : Aucune request ni limit définie
+- **Priorité** : La plus basse
+- **Éviction** : Premier à être évincé en cas de pression
+- **Risque** : Peut être tué à tout moment si le nœud manque de ressources
+
+---
+
+### Pourquoi les Limites de Ressources sont-elles Importantes dans les Systèmes Multi-Tenants ?
+
+#### 1. **Isolation et Équité (Fairness)**
+
+**Problème sans limites** :
+```
+Nœud avec 4 CPU cores
+├── Pod A (sans limites) → Utilise 3.5 cores  😈
+├── Pod B (sans limites) → Utilise 0.3 cores  😢
+└── Pod C (sans limites) → Utilise 0.2 cores  😢
+```
+
+**Solution avec limites** :
+```
+Nœud avec 4 CPU cores
+├── Pod A (limit: 1 core)   → Utilise max 1 core   ✅
+├── Pod B (limit: 1 core)   → Utilise max 1 core   ✅
+└── Pod C (limit: 1 core)   → Utilise max 1 core   ✅
+```
+
+**Bénéfice** : Chaque tenant/application reçoit sa part équitable des ressources.
+
+---
+
+#### 2. **Prévention du "Noisy Neighbor" (Voisin Bruyant)**
+
+**Scénario** : Dans un cluster partagé, un pod mal conçu ou malveillant pourrait :
+- Consommer tout le CPU disponible
+- Allouer toute la mémoire
+- Ralentir ou crasher les autres applications
+
+**Solution** : Les limits empêchent un pod de monopoliser les ressources.
+
+**Exemple réel** :
+```
+Cluster multi-tenant (3 clients)
+├── Client A : E-commerce (Black Friday)
+├── Client B : Blog personnel
+└── Client C : API critique
+
+Sans limites : Le trafic du Black Friday (Client A) pourrait 
+               ralentir l'API critique (Client C)
+
+Avec limites : Chaque client a ses ressources garanties et limitées
+```
+
+---
+
+#### 3. **Planification et Capacité (Capacity Planning)**
+
+**Avec requests** : Le Scheduler sait exactement combien de ressources sont nécessaires.
+
+**Exemple** :
+```
+Nœud avec 4 CPU cores disponibles
+
+Pod 1: requests 1 core  ✅ Placé sur le nœud (reste 3 cores)
+Pod 2: requests 1 core  ✅ Placé sur le nœud (reste 2 cores)
+Pod 3: requests 1 core  ✅ Placé sur le nœud (reste 1 core)
+Pod 4: requests 2 cores ❌ Ne peut PAS être placé (seulement 1 core disponible)
+                           → Scheduler cherche un autre nœud
+```
+
+**Sans requests** : Le Scheduler ne sait pas si le nœud a assez de ressources → risque de surcharge.
+
+---
+
+#### 4. **Prévention de l'Éviction en Cascade**
+
+**Scénario sans limites** :
+```
+1. Pod A consomme toute la mémoire du nœud
+2. Le nœud manque de mémoire (OOM)
+3. Kubernetes évince TOUS les pods BestEffort
+4. Interruption de service pour plusieurs applications
+```
+
+**Avec limites** :
+```
+1. Pod A atteint sa limite de mémoire (256Mi)
+2. Seul Pod A est tué (OOMKilled)
+3. Les autres pods continuent de fonctionner normalement
+4. Impact limité à une seule application
+```
+
+---
+
+#### 5. **Facturation et Coûts (Billing)**
+
+Dans les environnements cloud multi-tenants :
+- Les **requests** déterminent les ressources réservées → **Coût de base**
+- Les **limits** déterminent le coût maximum possible
+- Permet une facturation équitable basée sur l'utilisation réelle
+
+**Exemple** :
+```
+Client A: requests 2 cores, limits 4 cores
+→ Paye pour 2 cores garantis
+→ Peut utiliser jusqu'à 4 cores si disponibles (burst)
+
+Client B: requests 1 core, limits 1 core
+→ Paye pour 1 core garanti
+→ Coût prévisible et fixe
+```
+
+---
+
+#### 6. **Conformité et SLA (Service Level Agreements)**
+
+**SLA typique** : "Votre application aura au moins X CPU et Y mémoire disponibles 99.9% du temps"
+
+**Avec requests** : Le fournisseur peut garantir ce SLA car les ressources sont réservées.
+
+**Sans requests** : Impossible de garantir un SLA fiable.
+
+---
+
+### Bonnes Pratiques pour les Ressources
+
+#### 1. **Toujours Définir des Requests**
+```yaml
+# ❌ Mauvais - Pas de requests
+resources:
+  limits:
+    cpu: "500m"
+
+# ✅ Bon - Requests définies
+resources:
+  requests:
+    cpu: "100m"
+    memory: "128Mi"
+  limits:
+    cpu: "500m"
+    memory: "512Mi"
+```
+
+#### 2. **Requests Basées sur l'Utilisation Réelle**
+- Monitorer l'utilisation réelle de l'application
+- Utiliser des outils comme Prometheus, Grafana
+- Ajuster les requests en fonction des métriques
+
+#### 3. **Limits Raisonnables**
+- CPU limits : 2-5x les requests (permet le bursting)
+- Memory limits : 1.5-2x les requests (mémoire moins flexible)
+
+#### 4. **Utiliser LimitRanges pour les Namespaces**
+```yaml
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: default-limits
+  namespace: quote-lab
+spec:
+  limits:
+  - default:
+      cpu: "500m"
+      memory: "512Mi"
+    defaultRequest:
+      cpu: "100m"
+      memory: "128Mi"
+    type: Container
+```
+- Applique des limites par défaut à tous les pods du namespace
+- Empêche les pods sans limites
+
+#### 5. **Utiliser ResourceQuotas pour les Namespaces**
+```yaml
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: compute-quota
+  namespace: quote-lab
+spec:
+  hard:
+    requests.cpu: "4"
+    requests.memory: "8Gi"
+    limits.cpu: "10"
+    limits.memory: "16Gi"
+```
+- Limite les ressources totales par namespace
+- Essentiel pour les environnements multi-tenants
+
+---
+
+### Impact sur Notre Application
+
+**Avant** (sans limites) :
+- Le pod pouvait utiliser toutes les ressources du nœud
+- Risque de ralentir ou crasher d'autres applications
+- Pas de garantie de ressources minimales
+
+**Après** (avec limites) :
+- **Garanti** : 100m CPU et 128Mi mémoire
+- **Maximum** : 250m CPU et 256Mi mémoire
+- **QoS** : Burstable (peut utiliser plus si disponible)
+- **Protection** : Ne peut pas monopoliser les ressources du nœud
+
+**Comportement** :
+- En temps normal : Utilise ~100m CPU et ~128Mi mémoire
+- Sous charge : Peut utiliser jusqu'à 250m CPU (bursting)
+- Si dépassement mémoire : Pod tué et redémarré automatiquement
+
+---
+
+### Conclusion : Ressources dans les Systèmes Multi-Tenants
+
+Les limites de ressources sont **essentielles** pour :
+
+1. ✅ **Isolation** : Empêcher les "noisy neighbors"
+2. ✅ **Équité** : Garantir une distribution équitable des ressources
+3. ✅ **Stabilité** : Prévenir les surcharges et évictions en cascade
+4. ✅ **Planification** : Permettre un scheduling intelligent
+5. ✅ **Coûts** : Facturation équitable et prévisible
+6. ✅ **SLA** : Garantir des niveaux de service contractuels
+
+**Sans limites** : Un cluster multi-tenant est comme une autoroute sans limitations de vitesse - chaos garanti ! 🚗💨
+
+**Avec limites** : Chaque application a sa voie, sa vitesse, et tout le monde arrive à destination. 🚗✅
+
+
