@@ -922,4 +922,435 @@ Les limites de ressources sont **essentielles** pour :
 
 **Avec limites** : Chaque application a sa voie, sa vitesse, et tout le monde arrive à destination. 🚗✅
 
+---
+
+## Health Probes : Readiness et Liveness
+
+### Configuration Actuelle des Probes
+
+Notre deployment `quote-app` est déjà configuré avec des health probes pour assurer la fiabilité de l'application.
+
+#### Configuration dans deployment.yaml
+
+```yaml
+readinessProbe:
+  httpGet:
+    path: /health
+    port: 3000
+  initialDelaySeconds: 3
+  periodSeconds: 5
+
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 3000
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  failureThreshold: 3
+```
+
+#### Vérification de l'État
+
+```bash
+# Observer les probes dans un pod
+kubectl describe pod quote-app-c87bc649d-5bwx2
+
+# Résultat
+Liveness:   http-get http://:3000/health delay=30s timeout=1s period=10s #success=1 #failure=3
+Readiness:  http-get http://:3000/health delay=3s timeout=1s period=5s #success=1 #failure=3
+```
+
+---
+
+### Readiness Probe vs Liveness Probe : Quelle est la Différence ?
+
+#### **Readiness Probe (Sonde de Disponibilité)**
+
+**Question posée** : "Es-tu **prêt** à recevoir du trafic ?"
+
+**Définition** : Détermine si le pod est prêt à accepter des requêtes.
+
+**Comportement en cas d'échec** :
+- ❌ Le pod est **retiré des endpoints du Service**
+- ❌ Aucune requête n'est envoyée vers ce pod
+- ✅ Le pod **continue de tourner** (pas de redémarrage)
+- ✅ Kubernetes continue de vérifier périodiquement
+- ✅ Dès que la probe réussit, le pod reçoit à nouveau du trafic
+
+**Cas d'usage** :
+- Application en cours de démarrage (chargement de données, connexion DB)
+- Dépendances temporairement indisponibles (base de données, API externe)
+- Application temporairement surchargée (trop de requêtes en cours)
+
+**Exemple** :
+```
+Pod quote-app démarre
+├── 0-3s : Readiness probe échoue → Pas de trafic
+├── 3s : Application prête, probe réussit → Commence à recevoir du trafic
+└── 30s : Base de données redémarre
+    ├── Readiness probe échoue → Arrête de recevoir du trafic
+    └── DB revient → Probe réussit → Reprend le trafic
+```
+
+---
+
+#### **Liveness Probe (Sonde de Vivacité)**
+
+**Question posée** : "Es-tu encore **vivant** et fonctionnel ?"
+
+**Définition** : Détermine si le conteneur fonctionne correctement ou s'il est bloqué/corrompu.
+
+**Comportement en cas d'échec** :
+- ❌ Le conteneur est **tué** (SIGKILL)
+- ✅ Kubernetes **redémarre automatiquement** le conteneur
+- ⚠️ Le compteur de RESTARTS s'incrémente
+
+**Cas d'usage** :
+- Application bloquée (deadlock)
+- Fuite mémoire rendant l'application non-responsive
+- Corruption d'état interne irréparable
+- Thread principal crashé mais processus toujours actif
+
+**Exemple** :
+```
+Pod quote-app en production
+├── Application fonctionne normalement
+├── Deadlock survient → Application bloquée
+├── Liveness probe échoue 3 fois (failureThreshold: 3)
+├── Kubernetes tue le conteneur
+└── Nouveau conteneur démarre → Application fonctionne à nouveau
+```
+
+---
+
+### Tableau Comparatif : Readiness vs Liveness
+
+| Aspect | Readiness Probe | Liveness Probe |
+|--------|----------------|----------------|
+| **Question** | "Prêt à recevoir du trafic ?" | "Encore vivant ?" |
+| **Action si échec** | Retire du Service (pas de trafic) | Tue et redémarre le conteneur |
+| **Redémarrage** | ❌ Non | ✅ Oui |
+| **Impact** | Temporaire (peut récupérer) | Destructif (perte d'état) |
+| **Fréquence typique** | Rapide (5s) | Moins fréquente (10s) |
+| **Délai initial** | Court (3s) | Plus long (30s) |
+| **Cas d'usage** | Dépendances temporaires | Blocages irréparables |
+| **Compteur RESTARTS** | Pas affecté | S'incrémente |
+
+---
+
+### Pourquoi C'est Important en Production ?
+
+#### 1. **Déploiements Sans Interruption (Zero-Downtime Deployments)**
+
+**Sans Readiness Probe** :
+```
+Nouveau pod démarre
+├── 0s : Pod créé, ajouté au Service immédiatement
+├── 0-5s : Application démarre, pas encore prête
+├── Requêtes arrivent → 502 Bad Gateway ❌
+└── 5s : Application prête, mais certains utilisateurs ont vu des erreurs
+```
+
+**Avec Readiness Probe** :
+```
+Nouveau pod démarre
+├── 0s : Pod créé, PAS dans le Service
+├── 0-5s : Application démarre
+├── Readiness probe échoue → Pas de trafic
+├── 5s : Application prête, probe réussit
+└── Pod ajouté au Service → Commence à recevoir du trafic ✅
+```
+
+**Résultat** : Aucune erreur visible pour les utilisateurs !
+
+---
+
+#### 2. **Rolling Updates Sécurisés**
+
+Lors d'un rolling update, Kubernetes crée de nouveaux pods et supprime les anciens progressivement.
+
+**Avec Readiness Probe** :
+```
+Étape 1: 3 anciens pods actifs
+Étape 2: 1 nouveau pod créé
+    ├── Readiness probe échoue → Pas encore dans le Service
+    └── Probe réussit → Ajouté au Service
+Étape 3: 1 ancien pod supprimé (maintenant 3 pods actifs)
+Étape 4: Répéter jusqu'à ce que tous les pods soient nouveaux
+```
+
+**Garantie** : Toujours au moins N pods prêts pendant le déploiement.
+
+---
+
+#### 3. **Récupération Automatique des Blocages**
+
+**Scénario réel** : Deadlock dans l'application
+
+```
+Application Node.js
+├── Thread principal bloqué dans une boucle infinie
+├── Processus toujours actif (pas de crash)
+├── Impossible de répondre aux requêtes HTTP
+└── Sans liveness probe : Application reste bloquée indéfiniment ❌
+
+Avec liveness probe :
+├── Probe échoue après 3 tentatives
+├── Kubernetes tue le conteneur
+└── Nouveau conteneur démarre → Application fonctionne ✅
+```
+
+---
+
+#### 4. **Gestion des Dépendances Externes**
+
+**Exemple** : Base de données temporairement indisponible
+
+**Sans Readiness Probe** :
+```
+Base de données redémarre (30 secondes)
+├── Pods continuent de recevoir du trafic
+├── Toutes les requêtes échouent → 500 Internal Server Error
+└── Utilisateurs voient des erreurs pendant 30 secondes ❌
+```
+
+**Avec Readiness Probe** :
+```
+Base de données redémarre (30 secondes)
+├── Readiness probe échoue (connexion DB impossible)
+├── Pods retirés du Service
+├── Pas de nouvelles requêtes envoyées vers ces pods
+├── Load balancer route vers d'autres pods ou attend
+└── DB revient → Probes réussissent → Pods reprennent le trafic ✅
+```
+
+---
+
+#### 5. **Prévention des Cascades de Pannes**
+
+**Scénario** : Un pod surchargé ralentit
+
+**Sans Probes** :
+```
+Pod A surchargé (temps de réponse : 30s)
+├── Continue de recevoir du trafic
+├── Timeouts côté client
+├── Clients réessayent → Plus de charge
+└── Effet boule de neige → Tous les pods surchargés ❌
+```
+
+**Avec Readiness Probe** :
+```
+Pod A surchargé
+├── Readiness probe timeout (1s)
+├── Pod retiré du Service
+├── Trafic redistribué vers pods sains
+├── Pod A récupère progressivement
+└── Probe réussit → Pod reprend du trafic ✅
+```
+
+---
+
+### Configuration Optimale des Probes
+
+#### **Paramètres Importants**
+
+```yaml
+readinessProbe:
+  httpGet:
+    path: /health          # Endpoint à vérifier
+    port: 3000            # Port de l'application
+  initialDelaySeconds: 3  # Délai avant la première vérification
+  periodSeconds: 5        # Fréquence des vérifications
+  timeoutSeconds: 1       # Timeout par requête (défaut: 1s)
+  successThreshold: 1     # Nombre de succès pour être "ready" (défaut: 1)
+  failureThreshold: 3     # Nombre d'échecs pour être "not ready" (défaut: 3)
+
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 3000
+  initialDelaySeconds: 30 # Plus long pour laisser l'app démarrer
+  periodSeconds: 10       # Moins fréquent que readiness
+  timeoutSeconds: 1
+  successThreshold: 1
+  failureThreshold: 3     # 3 échecs = 30s avant redémarrage
+```
+
+---
+
+#### **Bonnes Pratiques**
+
+##### 1. **initialDelaySeconds**
+- **Readiness** : Court (3-5s) - dès que l'app peut répondre
+- **Liveness** : Long (30-60s) - laisser le temps de démarrer complètement
+- **Pourquoi** : Éviter de tuer un pod qui démarre normalement
+
+##### 2. **periodSeconds**
+- **Readiness** : Rapide (5s) - détecter rapidement les problèmes
+- **Liveness** : Moins fréquent (10-15s) - éviter la surcharge
+- **Pourquoi** : Balance entre réactivité et performance
+
+##### 3. **failureThreshold**
+- **Minimum** : 3 échecs
+- **Calcul** : `failureThreshold × periodSeconds` = temps avant action
+- **Exemple** : 3 × 10s = 30s avant redémarrage
+- **Pourquoi** : Éviter les redémarrages intempestifs sur pics temporaires
+
+##### 4. **Endpoint /health**
+- **Léger** : Réponse rapide (< 100ms)
+- **Significatif** : Vérifie les dépendances critiques
+- **Pas de side-effects** : Ne doit pas modifier l'état
+
+**Exemple d'implémentation Node.js** :
+```javascript
+app.get('/health', async (req, res) => {
+  try {
+    // Vérifier la connexion DB
+    await db.query('SELECT 1');
+    
+    // Vérifier d'autres dépendances critiques
+    // ...
+    
+    res.status(200).json({ status: 'healthy' });
+  } catch (error) {
+    res.status(503).json({ status: 'unhealthy', error: error.message });
+  }
+});
+```
+
+---
+
+### Simulation de Panne : Tester les Probes
+
+#### Test 1 : Casser l'Endpoint /health
+
+```bash
+# Se connecter au pod
+kubectl exec -it quote-app-c87bc649d-5bwx2 -- /bin/sh
+
+# Modifier temporairement l'application pour faire échouer /health
+# (Dans un vrai test, vous modifieriez le code)
+
+# Observer les événements
+kubectl get events --watch
+
+# Résultat attendu :
+# - Readiness probe échoue → Pod retiré du Service
+# - Liveness probe échoue 3 fois → Pod redémarré
+```
+
+#### Test 2 : Surcharger l'Application
+
+```bash
+# Générer beaucoup de requêtes
+for i in {1..1000}; do
+  curl http://localhost:8080/ &
+done
+
+# Observer
+kubectl describe pod quote-app-xxx
+
+# Résultat possible :
+# - Readiness probe timeout → Pod temporairement retiré
+# - Charge diminue → Pod reprend le trafic
+```
+
+---
+
+### Différences de Comportement Observables
+
+#### **Readiness Probe Échoue**
+
+```bash
+kubectl get endpoints quote-app
+
+# Avant échec :
+NAME        ENDPOINTS
+quote-app   10.42.0.23:3000,10.42.0.24:3000,10.42.0.25:3000
+
+# Après échec (pod 10.42.0.23) :
+NAME        ENDPOINTS
+quote-app   10.42.0.24:3000,10.42.0.25:3000  # Pod retiré
+
+kubectl get pods
+NAME                         READY   STATUS    RESTARTS   AGE
+quote-app-xxx-23             0/1     Running   0          5m  # 0/1 = Not Ready
+quote-app-xxx-24             1/1     Running   0          5m
+quote-app-xxx-25             1/1     Running   0          5m
+```
+
+#### **Liveness Probe Échoue**
+
+```bash
+kubectl get pods --watch
+
+# Observation :
+NAME                         READY   STATUS    RESTARTS   AGE
+quote-app-xxx-23             1/1     Running   0          5m
+quote-app-xxx-23             1/1     Running   1          5m30s  # RESTARTS incrémenté
+quote-app-xxx-23             0/1     Running   1          5m30s  # Redémarrage
+quote-app-xxx-23             1/1     Running   1          5m35s  # Prêt à nouveau
+
+kubectl describe pod quote-app-xxx-23
+# Events:
+# Warning  Unhealthy  Liveness probe failed: Get "http://10.42.0.23:3000/health": context deadline exceeded
+# Normal   Killing    Container quote-app failed liveness probe, will be restarted
+```
+
+---
+
+### Cas d'Usage Avancés
+
+#### 1. **Startup Probe** (Pour Applications Lentes)
+
+Pour les applications avec un démarrage très long (> 1 minute) :
+
+```yaml
+startupProbe:
+  httpGet:
+    path: /health
+    port: 3000
+  initialDelaySeconds: 0
+  periodSeconds: 10
+  failureThreshold: 30  # 30 × 10s = 5 minutes max pour démarrer
+```
+
+**Avantage** : Liveness probe ne commence qu'après le succès de la startup probe.
+
+#### 2. **Probes Différentes pour Readiness et Liveness**
+
+```yaml
+readinessProbe:
+  httpGet:
+    path: /ready  # Vérifie DB, cache, APIs externes
+    port: 3000
+
+livenessProbe:
+  httpGet:
+    path: /alive  # Vérifie seulement que le processus répond
+    port: 3000
+```
+
+**Pourquoi** : Readiness peut échouer pour dépendances externes, liveness seulement pour blocages internes.
+
+---
+
+### Conclusion : Probes en Production
+
+Les health probes sont **essentielles** pour :
+
+1. ✅ **Haute Disponibilité** : Détection et récupération automatiques
+2. ✅ **Déploiements Sûrs** : Zero-downtime deployments
+3. ✅ **Résilience** : Isolation des pods défaillants
+4. ✅ **Fiabilité** : Redémarrage automatique des conteneurs bloqués
+5. ✅ **Expérience Utilisateur** : Pas d'erreurs visibles pendant les incidents
+
+**Sans probes** : Votre application est comme un pilote automatique sans capteurs - elle ne sait pas quand elle est en difficulté ! ✈️❌
+
+**Avec probes** : Kubernetes surveille en permanence et corrige automatiquement les problèmes. ✈️✅
+
+**Règle d'or** : Toujours configurer readiness ET liveness probes en production !
+
+
 
