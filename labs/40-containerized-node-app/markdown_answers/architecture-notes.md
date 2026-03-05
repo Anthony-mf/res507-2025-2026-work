@@ -4,7 +4,7 @@
 
 **Architecture Diagram**
 
-![alt text](image-1.png)
+![alt text](image.png)
 
 **Where does isolation happen?**
 L'isolation a lieu au niveau des conteneurs (via les namespaces et cgroups de Linux) à l'intérieur des Pods. Chaque Pod offre un environnement d'exécution isolé pour ses conteneurs, séparant les processus, le réseau, et les points de montage. Si des machines virtuelles sont utilisées comme nœuds Kubernetes, une isolation matérielle supplémentaire est fournie au niveau de chaque VM via l'hyperviseur.
